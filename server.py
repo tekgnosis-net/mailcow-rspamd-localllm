@@ -5,7 +5,7 @@ import requests
 import re
 import time
 import os
-from urllib.parse import urlparse, quote
+from urllib.parse import urlparse, quote, urlunparse
 from requests.adapters import HTTPAdapter, Retry
 from ddgs import DDGS
 
@@ -81,9 +81,65 @@ def fetch_search(query):
 
 
 class RequestHandler(BaseHTTPRequestHandler):
+    def _normalize_api_url(user_url: str, endpoint_type: str = "chat") -> str:
+        """
+        Normalizes URLs for vLLM, Ollama, and llama.cpp.
+
+        endpoint_type: 'base' (for SDKs) or 'chat' (for raw requests)
+        """
+        # --- Examples ---
+        # OpenAI or vLLM or llama.cpp
+        # _normalize_api_url("localhost:8000", "base")) 
+        # Output: http://localhost:8000/v1
+        #
+        # Ollama
+        # _normalize_api_url("http://127.0.0.1:11434", "base")) 
+        # Output: http://127.0.0.1:11434
+        #
+        # chat 
+        # _normalize_api_url("https://my-vllm-server.com", "chat")) 
+        # Output: https://my-vllm-server.com  (Perfect for requests.post)
+
+        # Clean whitespace and trailing slashes
+        url = user_url.strip().rstrip("/")
+
+        # Ensure scheme exists
+        if not url.startswith(("http://", "https://")):
+            url = "http://" + url
+
+        parsed = urlparse(url)
+        path = parsed.path
+
+        # Remove redundant endpoints if user pasted the full path
+        if path.endswith("/chat/completions"):
+            path = path.replace("/chat/completions", "")
+        if path.endswith("/v1"):
+            path = path.replace("/v1", "")
+
+        # Rebuild clean base path
+        path = path.rstrip("/")
+
+        if endpoint_type == "base":
+            # Ollama natively handles its own routes; vLLM/llama.cpp usually need /v1
+            if "11434" in parsed.netloc:
+                new_path = path
+            else:
+                new_path = f"{path}/v1" if path else "/v1"
+        elif endpoint_type == "chat":
+            # For raw requests library (requests.post)
+            if "11434" in parsed.netloc:
+                new_path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
+            else:
+                new_path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
+
+        # Clean up double slashes
+        new_path = "/" + new_path.lstrip("/")
+
+        return urlunparse(parsed._replace(path=new_path))
+
     def do_POST(self):
-        ollama_api = os.environ.get('OLLAMA_API', 'http://127.0.0.1:11434')
-        url = f"{ollama_api}/v1/chat/completions"
+        llm_api = _normalize_api_url(os.environ.get('LLM_API', 'http://127.0.0.1:8000/v1'), "base")
+        url = f"{llm_api}/chat/completions"
 
         s = requests.Session()
 
@@ -126,7 +182,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             for attempt in range(max_retries):
                 try:
                     response = s.post(
-                        f"{ollama_api}/v1/chat/completions",
+                        f"{llm_api}/chat/completions",
                         json=data,
                         headers=headers,
                         timeout=45

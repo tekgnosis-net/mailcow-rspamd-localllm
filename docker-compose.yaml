@@ -5,7 +5,7 @@ services:
     container_name: rspamdgpt
     environment:
       PYTHONUNBUFFERED: "1"
-      OLLAMA_API: "http://127.0.0.1:11434"
+      LLM_API : "http://127.0.0.1:8000/v1"
     build:
       context: .
       dockerfile: Dockerfile

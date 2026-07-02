@@ -181,7 +181,7 @@ class TestRequestHandler:
         handler.end_headers = Mock()
         
         # Execute
-        with patch.dict('os.environ', {'OLLAMA_API': 'http://localhost:11434'}):
+        with patch.dict('os.environ', {'LLM_API': 'http://localhost:8000/v1'}):
             handler.do_POST()
         
         # Assert
@@ -202,7 +202,7 @@ class TestRequestHandler:
         handler.send_header = Mock()
         handler.end_headers = Mock()
         
-        with patch.dict('os.environ', {'OLLAMA_API': 'http://localhost:11434'}):
+        with patch.dict('os.environ', {'LLM_API': 'http://localhost:8000/v1'}):
             handler.do_POST()
         
         handler.send_response.assert_called_once_with(500)
@@ -219,7 +219,7 @@ class TestRequestHandler:
         handler.send_header = Mock()
         handler.end_headers = Mock()
         
-        with patch.dict('os.environ', {'OLLAMA_API': 'http://localhost:11434'}):
+        with patch.dict('os.environ', {'LLM_API': 'http://localhost:8000/v1'}):
             handler.do_POST()
         
         handler.send_response.assert_called_once_with(500)
@@ -261,7 +261,7 @@ class TestRequestHandler:
         handler.send_header = Mock()
         handler.end_headers = Mock()
         
-        with patch.dict('os.environ', {'OLLAMA_API': 'http://localhost:11434'}):
+        with patch.dict('os.environ', {'LLM_API': 'http://localhost:8000/v1'}):
             handler.do_POST()
         
         # Verify that session.post was called
