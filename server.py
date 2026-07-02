@@ -46,7 +46,7 @@ def extract_domains_and_names(messages):
     domains_list = list(domains)[:3]
     return domains_list, list(names)
 
-def fetch_search(query):
+def fetch_search_ddgs(query):
     """Search using DDGS library with multiple backends."""
     max_retries = 3
     backends = "brave, duckduckgo"
@@ -80,66 +80,135 @@ def fetch_search(query):
     return [{"title": "Error", "link": "", "snippet": "Search failed after all retries"}]
 
 
-class RequestHandler(BaseHTTPRequestHandler):
-    def _normalize_api_url(user_url: str, endpoint_type: str = "chat") -> str:
-        """
-        Normalizes URLs for vLLM, Ollama, and llama.cpp.
+def fetch_search_firecrawl(query):
+    """Search using a (self-hosted) Firecrawl instance's search API.
 
-        endpoint_type: 'base' (for SDKs) or 'chat' (for raw requests)
-        """
-        # --- Examples ---
-        # OpenAI or vLLM or llama.cpp
-        # _normalize_api_url("localhost:8000", "base")) 
-        # Output: http://localhost:8000/v1
-        #
-        # Ollama
-        # _normalize_api_url("http://127.0.0.1:11434", "base")) 
-        # Output: http://127.0.0.1:11434
-        #
-        # chat 
-        # _normalize_api_url("https://my-vllm-server.com", "chat")) 
-        # Output: https://my-vllm-server.com  (Perfect for requests.post)
+    Works against the Firecrawl API directly or through a transparent proxy
+    such as firecrawl-dashboard — only the base URL differs.
+    """
+    max_retries = 3
+    base_url = os.environ.get('FIRECRAWL_API_URL', 'http://localhost:3002').strip().rstrip('/')
+    api_key = os.environ.get('FIRECRAWL_API_KEY', '').strip()
 
-        # Clean whitespace and trailing slashes
-        url = user_url.strip().rstrip("/")
+    headers = {'User-Agent': 'mailcow-rspamd-localllm'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
 
-        # Ensure scheme exists
-        if not url.startswith(("http://", "https://")):
-            url = "http://" + url
+    for attempt in range(max_retries):
+        try:
+            response = None
+            # Older self-hosted images only expose /v1/search, so fall back on 404
+            for endpoint in ('/v2/search', '/v1/search'):
+                response = requests.post(
+                    f'{base_url}{endpoint}',
+                    json={'query': query, 'limit': 2},
+                    headers=headers,
+                    timeout=15
+                )
+                if response.status_code != 404:
+                    break
+            response.raise_for_status()
+            payload = response.json()
 
-        parsed = urlparse(url)
-        path = parsed.path
+            if not payload.get('success', True):
+                raise ValueError(payload.get('warning') or 'Firecrawl returned success=false')
 
-        # Remove redundant endpoints if user pasted the full path
-        if path.endswith("/chat/completions"):
-            path = path.replace("/chat/completions", "")
-        if path.endswith("/v1"):
-            path = path.replace("/v1", "")
+            data = payload.get('data', [])
+            # v2 groups results by source ({"web": [...]}), v1 returns a flat list
+            items = data.get('web', []) if isinstance(data, dict) else data
 
-        # Rebuild clean base path
-        path = path.rstrip("/")
+            formatted_results = []
+            for res in items:
+                formatted_results.append({
+                    'title': res.get('title') or 'No title',
+                    'link': res.get('url', ''),
+                    'snippet': res.get('description') or ''
+                })
 
-        if endpoint_type == "base":
-            # Ollama natively handles its own routes; vLLM/llama.cpp usually need /v1
-            if "11434" in parsed.netloc:
-                new_path = path
-            else:
-                new_path = f"{path}/v1" if path else "/v1"
-        elif endpoint_type == "chat":
-            # For raw requests library (requests.post)
-            if "11434" in parsed.netloc:
-                new_path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
-            else:
-                new_path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
+            return formatted_results if formatted_results else [{"title": "No results", "link": "", "snippet": "No search results found"}]
 
-        # Clean up double slashes
+        except Exception as e:
+            if attempt == max_retries - 1:  # Last attempt
+                return [{"title": "Error", "link": "", "snippet": "Search service error after {} attempts: {}".format(max_retries, str(e))}]
+            print("Firecrawl search attempt {} failed: {}. Retrying...".format(attempt + 1, e))
+            time.sleep(1 * (attempt + 1))  # Exponential backoff
+
+    return [{"title": "Error", "link": "", "snippet": "Search failed after all retries"}]
+
+
+def fetch_search(query):
+    """Dispatch a search to the provider selected via SEARCH_PROVIDER (ddgs or firecrawl)."""
+    provider = os.environ.get('SEARCH_PROVIDER', 'ddgs').strip().lower()
+    if provider == 'firecrawl':
+        return fetch_search_firecrawl(query)
+    if provider in ('ddgs', 'duckduckgo'):
+        return fetch_search_ddgs(query)
+    # A misspelled provider must not silently send queries to an unintended engine
+    print(f"Unknown SEARCH_PROVIDER '{provider}', not searching. Use 'ddgs' or 'firecrawl'.")
+    return [{"title": "Error", "link": "", "snippet": f"Unknown SEARCH_PROVIDER: {provider}"}]
+
+
+def _normalize_api_url(user_url: str, endpoint_type: str = "chat") -> str:
+    """
+    Normalizes URLs for vLLM, Ollama, and llama.cpp.
+
+    endpoint_type: 'base' (for SDKs) or 'chat' (for raw requests)
+    """
+    # --- Examples ---
+    # OpenAI or vLLM or llama.cpp
+    # _normalize_api_url("localhost:8000", "base")
+    # Output: http://localhost:8000/v1
+    #
+    # Ollama
+    # _normalize_api_url("http://127.0.0.1:11434", "base")
+    # Output: http://127.0.0.1:11434
+    #
+    # chat
+    # _normalize_api_url("https://my-vllm-server.com", "chat")
+    # Output: https://my-vllm-server.com/v1/chat/completions  (Perfect for requests.post)
+
+    # Clean whitespace and trailing slashes
+    url = user_url.strip().rstrip("/")
+
+    # Ensure scheme exists
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+
+    parsed = urlparse(url)
+    path = parsed.path
+
+    # Remove redundant endpoints if user pasted the full path
+    if path.endswith("/chat/completions"):
+        path = path.replace("/chat/completions", "")
+    if path.endswith("/v1"):
+        path = path.replace("/v1", "")
+
+    # Rebuild clean base path
+    path = path.rstrip("/")
+
+    if endpoint_type == "base":
+        # Ollama natively handles its own routes; vLLM/llama.cpp usually need /v1
+        if "11434" in parsed.netloc:
+            new_path = path
+        else:
+            new_path = f"{path}/v1" if path else "/v1"
+    elif endpoint_type == "chat":
+        # For raw requests library (requests.post)
+        if "11434" in parsed.netloc:
+            new_path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
+        else:
+            new_path = f"{path}/v1/chat/completions" if path else "/v1/chat/completions"
+
+    # Clean up double slashes; keep an empty path empty (no trailing slash)
+    if new_path:
         new_path = "/" + new_path.lstrip("/")
 
-        return urlunparse(parsed._replace(path=new_path))
+    return urlunparse(parsed._replace(path=new_path))
 
+
+class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        llm_api = _normalize_api_url(os.environ.get('LLM_API', 'http://127.0.0.1:8000/v1'), "base")
-        url = f"{llm_api}/chat/completions"
+        url = _normalize_api_url(os.environ.get('LLM_API', 'http://127.0.0.1:8000/v1'), "chat")
 
         s = requests.Session()
 
@@ -182,7 +251,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             for attempt in range(max_retries):
                 try:
                     response = s.post(
-                        f"{llm_api}/chat/completions",
+                        url,
                         json=data,
                         headers=headers,
                         timeout=45

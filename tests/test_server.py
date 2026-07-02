@@ -1,5 +1,6 @@
 import pytest
 import json
+import requests
 from unittest.mock import Mock, patch, MagicMock
 from http.server import HTTPServer
 import server
@@ -137,6 +138,151 @@ class TestFetchSearch:
             assert "title" in result
             assert "link" in result
             assert "snippet" in result
+
+
+class TestFirecrawlSearch:
+    """Test cases for fetch_search_firecrawl function (network fully mocked)"""
+
+    def _mock_response(self, status_code=200, payload=None):
+        response = Mock()
+        response.status_code = status_code
+        response.json = Mock(return_value=payload if payload is not None else {})
+        response.raise_for_status = Mock()
+        if status_code >= 400:
+            response.raise_for_status.side_effect = requests.exceptions.HTTPError(f"HTTP {status_code}")
+        return response
+
+    @patch('server.requests.post')
+    def test_v2_response_format(self, mock_post):
+        """Test parsing a Firecrawl v2 response (results grouped under data.web)"""
+        payload = {
+            "success": True,
+            "data": {
+                "web": [
+                    {"title": "Example Site", "url": "https://example.com", "description": "A snippet"}
+                ]
+            }
+        }
+        mock_post.return_value = self._mock_response(payload=payload)
+
+        with patch.dict('os.environ', {'FIRECRAWL_API_URL': 'http://firecrawl:3002'}):
+            results = server.fetch_search_firecrawl("example.com")
+
+        assert results == [
+            {"title": "Example Site", "link": "https://example.com", "snippet": "A snippet"}
+        ]
+        args, kwargs = mock_post.call_args
+        assert args[0] == 'http://firecrawl:3002/v2/search'
+        assert kwargs['json'] == {'query': 'example.com', 'limit': 2}
+        assert 'Authorization' not in kwargs['headers']
+
+    @patch('server.requests.post')
+    def test_v1_flat_list_response(self, mock_post):
+        """Test parsing a Firecrawl v1 response (data is a flat list)"""
+        payload = {
+            "success": True,
+            "data": [
+                {"title": "Old Style", "url": "https://v1.example.com", "description": "v1 snippet"}
+            ]
+        }
+        mock_post.return_value = self._mock_response(payload=payload)
+
+        with patch.dict('os.environ', {'FIRECRAWL_API_URL': 'http://firecrawl:3002'}):
+            results = server.fetch_search_firecrawl("query")
+
+        assert results == [
+            {"title": "Old Style", "link": "https://v1.example.com", "snippet": "v1 snippet"}
+        ]
+
+    @patch('server.requests.post')
+    def test_api_key_sent_as_bearer(self, mock_post):
+        """Test that FIRECRAWL_API_KEY is sent as a Bearer token"""
+        payload = {"success": True, "data": {"web": [{"title": "T", "url": "https://u", "description": "D"}]}}
+        mock_post.return_value = self._mock_response(payload=payload)
+
+        env = {'FIRECRAWL_API_URL': 'http://firecrawl:3002', 'FIRECRAWL_API_KEY': 'fc-test-key'}
+        with patch.dict('os.environ', env):
+            server.fetch_search_firecrawl("query")
+
+        _, kwargs = mock_post.call_args
+        assert kwargs['headers']['Authorization'] == 'Bearer fc-test-key'
+
+    @patch('server.requests.post')
+    def test_falls_back_to_v1_endpoint_on_404(self, mock_post):
+        """Test that a 404 on /v2/search falls back to /v1/search (older self-hosted images)"""
+        v1_payload = {"success": True, "data": [{"title": "T", "url": "https://u", "description": "D"}]}
+        mock_post.side_effect = [
+            self._mock_response(status_code=404),
+            self._mock_response(payload=v1_payload),
+        ]
+
+        with patch.dict('os.environ', {'FIRECRAWL_API_URL': 'http://firecrawl:3002'}):
+            results = server.fetch_search_firecrawl("query")
+
+        urls = [call.args[0] for call in mock_post.call_args_list]
+        assert urls == ['http://firecrawl:3002/v2/search', 'http://firecrawl:3002/v1/search']
+        assert results[0]["title"] == "T"
+
+    @patch('server.requests.post')
+    def test_no_results(self, mock_post):
+        """Test that an empty result set returns the 'No results' placeholder"""
+        payload = {"success": True, "data": {"web": []}}
+        mock_post.return_value = self._mock_response(payload=payload)
+
+        with patch.dict('os.environ', {'FIRECRAWL_API_URL': 'http://firecrawl:3002'}):
+            results = server.fetch_search_firecrawl("query")
+
+        assert results == [{"title": "No results", "link": "", "snippet": "No search results found"}]
+
+    @patch('server.time.sleep')
+    @patch('server.requests.post')
+    def test_error_after_all_retries(self, mock_post, mock_sleep):
+        """Test that persistent connection errors return an Error result after 3 attempts"""
+        mock_post.side_effect = requests.exceptions.ConnectionError("connection refused")
+
+        with patch.dict('os.environ', {'FIRECRAWL_API_URL': 'http://firecrawl:3002'}):
+            results = server.fetch_search_firecrawl("query")
+
+        assert results[0]["title"] == "Error"
+        assert mock_post.call_count == 3
+
+
+class TestSearchProviderDispatch:
+    """Test cases for the fetch_search provider dispatcher"""
+
+    @patch('server.fetch_search_ddgs')
+    def test_default_provider_is_ddgs(self, mock_ddgs):
+        """Test that DDGS is used when SEARCH_PROVIDER is unset"""
+        mock_ddgs.return_value = [{"title": "t", "link": "l", "snippet": "s"}]
+
+        with patch.dict('os.environ', {}, clear=True):
+            results = server.fetch_search("query")
+
+        mock_ddgs.assert_called_once_with("query")
+        assert results == mock_ddgs.return_value
+
+    @patch('server.fetch_search_firecrawl')
+    def test_firecrawl_provider_selected(self, mock_firecrawl):
+        """Test that SEARCH_PROVIDER=firecrawl routes to fetch_search_firecrawl"""
+        mock_firecrawl.return_value = [{"title": "t", "link": "l", "snippet": "s"}]
+
+        with patch.dict('os.environ', {'SEARCH_PROVIDER': 'firecrawl'}):
+            results = server.fetch_search("query")
+
+        mock_firecrawl.assert_called_once_with("query")
+        assert results == mock_firecrawl.return_value
+
+    @patch('server.fetch_search_firecrawl')
+    @patch('server.fetch_search_ddgs')
+    def test_unknown_provider_returns_error_without_searching(self, mock_ddgs, mock_firecrawl):
+        """Test that a typo'd SEARCH_PROVIDER never sends the query anywhere"""
+        with patch.dict('os.environ', {'SEARCH_PROVIDER': 'goggle'}):
+            results = server.fetch_search("query")
+
+        assert results[0]["title"] == "Error"
+        assert "goggle" in results[0]["snippet"]
+        mock_ddgs.assert_not_called()
+        mock_firecrawl.assert_not_called()
 
 
 class TestRequestHandler:

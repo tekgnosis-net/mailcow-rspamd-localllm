@@ -1,14 +1,19 @@
-version: '3'
-
 services:
   rspamdgpt:
     container_name: rspamdgpt
+    image: ghcr.io/tekgnosis-net/mailcow-rspamd-localllm:latest
+    pull_policy: always
+    # To build locally instead of pulling from GHCR, comment out `image` and
+    # `pull_policy` above and uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
     environment:
       PYTHONUNBUFFERED: "1"
-      LLM_API : "http://127.0.0.1:8000/v1"
-    build:
-      context: .
-      dockerfile: Dockerfile
+      LLM_API: ${LLM_API:-http://127.0.0.1:8000/v1}
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-ddgs}
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
     user: "10000:10000"
     restart: unless-stopped
     networks:

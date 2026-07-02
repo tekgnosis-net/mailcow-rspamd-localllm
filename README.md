@@ -7,6 +7,7 @@ A proxy server that enhances spam detection by integrating web search context wi
 - Dual-stack IPv4/IPv6 HTTP server
 - Extracts domains and names from email headers
 - Fetches contextual information via web search
+- Pluggable search provider: DuckDuckGo (via `ddgs`) or a self-hosted [Firecrawl](https://github.com/tekgnosis-net/firecrawl) instance (a fork with [Camoufox](https://github.com/daijro/camoufox) integration in place of generic Playwright, for stealthier and more reliable search/scrape)
 - Integrates with Local LLM's API for AI-powered spam detection
 - Retry logic for robust handling of network issues
 
@@ -14,9 +15,14 @@ A proxy server that enhances spam detection by integrating web search context wi
 
 ### Using Docker (Recommended)
 
+`docker-compose.yaml` pulls the prebuilt image from GitHub Container Registry (`ghcr.io/tekgnosis-net/mailcow-rspamd-localllm:latest`).
+
 ```bash
+cp .env.example .env   # then edit to match your setup
 docker-compose up -d
 ```
+
+To build locally instead, comment out `image:` and `pull_policy:` in `docker-compose.yaml` and uncomment the `build:` block.
 
 ### Manual Installation
 
@@ -32,9 +38,16 @@ python server.py
 
 ## Configuration
 
-Set the following environment variable:
+Configuration is via environment variables. With Docker Compose, put them in a `.env` file next to `docker-compose.yaml` (see `.env.example`) — compose reads it automatically and passes the values through to the container.
 
-- `LLM_API`: URL of the Local LLM API endpoint (default: `http://127.0.0.1:8000/v1`)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_API` | `http://127.0.0.1:8000/v1` | URL of the local LLM's OpenAI-compatible endpoint (vLLM, llama.cpp, or Ollama). Any form works: bare host, with `/v1`, or a full pasted `/v1/chat/completions` path. Inside the container `127.0.0.1` is the container itself, so point it at a reachable host or service name. |
+| `SEARCH_PROVIDER` | `ddgs` | Web search provider used to enrich prompts: `ddgs` (Brave/DuckDuckGo via the `ddgs` library) or `firecrawl`. |
+| `FIRECRAWL_API_URL` | `http://localhost:3002` | Base URL of your self-hosted Firecrawl instance (used when `SEARCH_PROVIDER=firecrawl`). Can also point at a [firecrawl-dashboard](https://github.com/tekgnosis-net/firecrawl-dashboard) transparent proxy so searches show up in its metrics. |
+| `FIRECRAWL_API_KEY` | *(unset)* | Optional Bearer token, only needed if your Firecrawl instance enforces authentication. |
+
+The proxy calls Firecrawl's `/v2/search` endpoint and falls back to `/v1/search` automatically for older self-hosted images. If `SEARCH_PROVIDER` is set to an unknown value, no search is performed at all — queries are never silently rerouted to a different engine.
 
 ## Mailcow setup / configuration
 
@@ -76,6 +89,11 @@ Run tests:
 pytest
 ```
 
+The `TestFetchSearch` class performs real web searches; when offline or rate-limited, skip it with:
+```bash
+pytest --deselect tests/test_server.py::TestFetchSearch
+```
+
 ### Running Linters
 
 ```bash
@@ -88,8 +106,14 @@ The server exposes a POST endpoint that:
 1. Accepts chat completion requests
 2. Extracts domains and sender names from messages
 3. Fetches web context for extracted entities
-4. Forwards enriched messages to Ollama API
+4. Forwards enriched messages to the configured LLM API
 5. Returns the AI-generated response
+
+## Releases
+
+Versioning and publishing are automated with [semantic-release](https://github.com/semantic-release/semantic-release): pushes to `master` with [Conventional Commit](https://www.conventionalcommits.org/) messages (`feat:`, `fix:`, `perf:`, or a `BREAKING CHANGE:` footer) create a GitHub release and publish a multi-arch (amd64/arm64) image to `ghcr.io/tekgnosis-net/mailcow-rspamd-localllm`, tagged `latest`, `X.Y.Z`, and `X.Y`. Commits typed `chore:`, `docs:`, etc. do not trigger a release.
+
+> **Note:** the first package published to GHCR defaults to private visibility. Make it public in the package settings (or `docker login ghcr.io` on the deployment host) so `docker-compose pull` works.
 
 ## License
 

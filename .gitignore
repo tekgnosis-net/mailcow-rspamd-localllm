@@ -64,3 +64,6 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local plugin symlink
+supertool
